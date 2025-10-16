@@ -1,0 +1,210 @@
+version: '3.8'
+
+services:
+  # =============================================
+  # DATABASES
+  # =============================================
+  
+  postgres-auth:
+    image: postgres:15
+    container_name: agenthub-postgres-auth
+    environment:
+      POSTGRES_DB: auth_service
+      POSTGRES_USER: agenthub
+      POSTGRES_PASSWORD: agenthub_password
+    volumes:
+      - postgres_auth_data:/var/lib/postgresql/data
+      - ../shared/database_schemas.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - agenthub-network
+
+  postgres-agent:
+    image: postgres:15
+    container_name: agenthub-postgres-agent
+    environment:
+      POSTGRES_DB: agent_orchestrator
+      POSTGRES_USER: agenthub
+      POSTGRES_PASSWORD: agenthub_password
+    volumes:
+      - postgres_agent_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    networks:
+      - agenthub-network
+
+  postgres-document:
+    image: postgres:15
+    container_name: agenthub-postgres-document
+    environment:
+      POSTGRES_DB: document_service
+      POSTGRES_USER: agenthub
+      POSTGRES_PASSWORD: agenthub_password
+    volumes:
+      - postgres_document_data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    networks:
+      - agenthub-network
+
+  postgres-billing:
+    image: postgres:15
+    container_name: agenthub-postgres-billing
+    environment:
+      POSTGRES_DB: billing_service
+      POSTGRES_USER: agenthub
+      POSTGRES_PASSWORD: agenthub_password
+    volumes:
+      - postgres_billing_data:/var/lib/postgresql/data
+    ports:
+      - "5435:5432"
+    networks:
+      - agenthub-network
+
+  # =============================================
+  # REDIS FOR CACHING AND QUEUES
+  # =============================================
+  
+  redis:
+    image: redis:7-alpine
+    container_name: agenthub-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - agenthub-network
+
+  # =============================================
+  # MINIO FOR FILE STORAGE
+  # =============================================
+  
+  minio:
+    image: minio/minio:latest
+    container_name: agenthub-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - agenthub-network
+
+  # =============================================
+  # MICROSERVICES
+  # =============================================
+  
+  auth-service:
+    build:
+      context: ../services/auth-service
+      dockerfile: Dockerfile
+    container_name: agenthub-auth-service
+    environment:
+      DATABASE_URL: postgresql://agenthub:agenthub_password@postgres-auth:5432/auth_service
+      SECRET_KEY: your-secret-key-change-in-production
+    ports:
+      - "8001:8001"
+    depends_on:
+      - postgres-auth
+    networks:
+      - agenthub-network
+    restart: unless-stopped
+
+  agent-orchestrator:
+    build:
+      context: ../services/agent-orchestrator
+      dockerfile: Dockerfile
+    container_name: agenthub-agent-orchestrator
+    environment:
+      DATABASE_URL: postgresql://agenthub:agenthub_password@postgres-agent:5432/agent_orchestrator
+      GEMINI_API_KEY: your-gemini-api-key
+      AUTH_SERVICE_URL: http://auth-service:8001
+      BILLING_SERVICE_URL: http://billing-service:8004
+    ports:
+      - "8002:8002"
+    depends_on:
+      - postgres-agent
+      - auth-service
+      - billing-service
+    networks:
+      - agenthub-network
+    restart: unless-stopped
+
+  document-service:
+    build:
+      context: ../services/document-service
+      dockerfile: Dockerfile
+    container_name: agenthub-document-service
+    environment:
+      DATABASE_URL: postgresql://agenthub:agenthub_password@postgres-document:5432/document_service
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: documents
+      AUTH_SERVICE_URL: http://auth-service:8001
+      AGENT_ORCHESTRATOR_URL: http://agent-orchestrator:8002
+    ports:
+      - "8003:8003"
+    depends_on:
+      - postgres-document
+      - minio
+      - auth-service
+    networks:
+      - agenthub-network
+    restart: unless-stopped
+
+  billing-service:
+    build:
+      context: ../services/billing-service
+      dockerfile: Dockerfile
+    container_name: agenthub-billing-service
+    environment:
+      DATABASE_URL: postgresql://agenthub:agenthub_password@postgres-billing:5432/billing_service
+      AUTH_SERVICE_URL: http://auth-service:8001
+    ports:
+      - "8004:8004"
+    depends_on:
+      - postgres-billing
+      - auth-service
+    networks:
+      - agenthub-network
+    restart: unless-stopped
+
+  # =============================================
+  # API GATEWAY
+  # =============================================
+  
+  api-gateway:
+    image: nginx:alpine
+    container_name: agenthub-api-gateway
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - auth-service
+      - agent-orchestrator
+      - document-service
+      - billing-service
+    networks:
+      - agenthub-network
+    restart: unless-stopped
+
+volumes:
+  postgres_auth_data:
+  postgres_agent_data:
+  postgres_document_data:
+  postgres_billing_data:
+  redis_data:
+  minio_data:
+
+networks:
+  agenthub-network:
+    driver: bridge
+
